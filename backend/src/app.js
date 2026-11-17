@@ -6,6 +6,7 @@ import { pool } from './config/db.js';
 import authRoutes from './routes/auth.routes.js';
 import stationRoutes from './routes/stations.routes.js';
 import { bot } from './bot/bot.js';
+import queueRoutes from './routes/queue.routes.js';
 
 dotenv.config();
 
@@ -53,6 +54,7 @@ app.get('/api/health', async (req, res) => {
 // 3. Shared Core API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/stations', stationRoutes);
+app.use('/api/queue', queueRoutes);
 
 // 4. Telegram Bot Webhook Endpoint (Production on Plesk)
 const webhookPath = '/api/telegram/webhook';
