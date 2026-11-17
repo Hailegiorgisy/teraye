@@ -1,0 +1,107 @@
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import dotenv from 'dotenv';
+import { pool } from './config/db.js';
+import authRoutes from './routes/auth.routes.js';
+import stationRoutes from './routes/stations.routes.js';
+import { bot } from './bot/bot.js';
+
+dotenv.config();
+
+const app = express();
+const PORT = Number(process.env.PORT) || 3000;
+const isProd = process.env.NODE_ENV === 'production';
+
+// 1. Security & Body Parsing Middleware
+app.use(
+  helmet({
+    // Allow Telegram WebApp iframe embedding
+    contentSecurityPolicy: false,
+  })
+);
+
+const allowedOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin: allowedOrigins.length > 0 ? allowedOrigins : true,
+    credentials: true,
+  })
+);
+
+app.use(express.json({ limit: '256kb' }));
+
+// 2. Health Check Endpoint (Verify Plesk + PostgreSQL connectivity)
+app.get('/api/health', async (req, res) => {
+  try {
+    const dbCheck = await pool.query('SELECT NOW() AS server_time');
+    return res.json({
+      status: 'ok',
+      app: process.env.APP_NAME || 'Teraye',
+      time: dbCheck.rows[0].server_time,
+    });
+  } catch (err) {
+    console.error('[Health Check Failed]:', err.message);
+    return res.status(503).json({ status: 'error', database: 'unreachable' });
+  }
+});
+
+// 3. Shared Core API Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/stations', stationRoutes);
+
+// 4. Telegram Bot Webhook Endpoint (Production on Plesk)
+const webhookPath = '/api/telegram/webhook';
+if (bot && isProd && process.env.PUBLIC_API_URL) {
+  app.use(bot.webhookCallback(webhookPath));
+}
+
+// 5. Global 404 & Error Handler
+app.use((req, res) => {
+  res.status(404).json({ error: 'Endpoint not found.' });
+});
+
+app.use((err, req, res, next) => {
+  console.error('[Unhandled Server Error]:', err);
+  res.status(500).json({ error: 'Internal server error.' });
+});
+
+// 6. Start Server & Bot
+const server = app.listen(PORT, async () => {
+  console.log(`🚀 ${process.env.APP_NAME || 'Teraye'} API running on port ${PORT}`);
+
+  if (bot) {
+    try {
+      if (isProd && process.env.PUBLIC_API_URL) {
+        const fullWebhookUrl = `${process.env.PUBLIC_API_URL.replace(/\/$/, '')}${webhookPath}`;
+        await bot.telegram.setWebhook(fullWebhookUrl);
+        console.log(`🤖 Telegram Bot webhook registered: ${fullWebhookUrl}`);
+      } else {
+        await bot.launch();
+        console.log('🤖 Telegram Bot started in local polling mode');
+      }
+    } catch (botErr) {
+      console.error('[Telegram Bot Startup Error]:', botErr.message);
+    }
+  }
+});
+
+// 7. Graceful Shutdown (Prevents broken DB transactions during Plesk/Git deploys)
+async function shutdown(signal) {
+  console.log(`\n[${signal}] Shutting down gracefully...`);
+  if (bot && !isProd) {
+    bot.stop(signal);
+  }
+  server.close(async () => {
+    await pool.end();
+    console.log('✅ HTTP server and PostgreSQL pool closed.');
+    process.exit(0);
+  });
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
