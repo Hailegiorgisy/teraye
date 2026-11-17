@@ -1,3 +1,5 @@
+import path from 'path';
+import { fileURLToPath } from 'url';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -5,10 +7,13 @@ import dotenv from 'dotenv';
 import { pool } from './config/db.js';
 import authRoutes from './routes/auth.routes.js';
 import stationRoutes from './routes/stations.routes.js';
-import { bot } from './bot/bot.js';
 import queueRoutes from './routes/queue.routes.js';
+import { bot } from './bot/bot.js';
 
 dotenv.config();
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const frontendDist = path.resolve(__dirname, '../public');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -61,18 +66,15 @@ const webhookPath = '/api/telegram/webhook';
 if (bot && isProd && process.env.PUBLIC_API_URL) {
   app.use(bot.webhookCallback(webhookPath));
 }
-import path from 'path';
-import { fileURLToPath } from 'url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const frontendDist = path.resolve(__dirname, '../../frontend/dist');
-
+// 5. Serve Built React Frontend (Telegram Mini App + PWA)
 app.use(express.static(frontendDist));
 app.get('*', (req, res, next) => {
   if (req.path.startsWith('/api')) return next();
   res.sendFile(path.join(frontendDist, 'index.html'));
 });
-// 5. Global 404 & Error Handler
+
+// 6. Global 404 & Error Handler
 app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint not found.' });
 });
@@ -82,7 +84,7 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error.' });
 });
 
-// 6. Start Server & Bot
+// 7. Start Server & Bot
 const server = app.listen(PORT, async () => {
   console.log(`🚀 ${process.env.APP_NAME || 'Teraye'} API running on port ${PORT}`);
 
@@ -102,7 +104,7 @@ const server = app.listen(PORT, async () => {
   }
 });
 
-// 7. Graceful Shutdown (Prevents broken DB transactions during Plesk/Git deploys)
+// 8. Graceful Shutdown (Prevents broken DB transactions during Plesk/Git deploys)
 async function shutdown(signal) {
   console.log(`\n[${signal}] Shutting down gracefully...`);
   if (bot && !isProd) {
