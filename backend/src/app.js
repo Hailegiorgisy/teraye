@@ -61,7 +61,17 @@ const webhookPath = '/api/telegram/webhook';
 if (bot && isProd && process.env.PUBLIC_API_URL) {
   app.use(bot.webhookCallback(webhookPath));
 }
+import path from 'path';
+import { fileURLToPath } from 'url';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const frontendDist = path.resolve(__dirname, '../../frontend/dist');
+
+app.use(express.static(frontendDist));
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api')) return next();
+  res.sendFile(path.join(frontendDist, 'index.html'));
+});
 // 5. Global 404 & Error Handler
 app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint not found.' });
