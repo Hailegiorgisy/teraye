@@ -13,5 +13,5 @@ INSERT IGNORE INTO teraye_routes (origin_station_id, destination_am, destination
 
 -- Replace 123456789 and +251911000000 with your real Telegram ID and phone number
 INSERT INTO teraye_users (id, telegram_id, phone_number, full_name, role, assigned_station_id)
-VALUES (UUID(), 123456789, '+251911000000', 'System Admin', 'ADMIN', 1)
+VALUES (UUID(), 611027806, '+2519121319216', 'System Admin', 'ADMIN', 1)
 ON DUPLICATE KEY UPDATE role = 'ADMIN', assigned_station_id = 1;
