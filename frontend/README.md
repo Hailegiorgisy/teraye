@@ -1,19 +1,25 @@
-# Teraye (ተራየ) Complete Logo Assets + Integration Code Pack
+# Teraye Frontend Auth & Phone Format Components
 
-## Folder Structure
-- `public/` -> Copy all files into `D:\Projects\teraye\frontend\public\`
-- `src/assets/` -> Copy all files into `D:\Projects\teraye\frontend\src\assets\`
-- `snippets/index.html` -> Ready-to-use `frontend/index.html` with all favicon & Apple Touch icon links
-- `snippets/TerayeLogoComponents.tsx` -> Ready-to-use React components for the Login card (`h-24`) and Dashboard top bar (`h-9`)
-- `snippets/check_admin_user.sql` -> SQL query to inspect `teraye_users` in phpMyAdmin
+## Included Files
+- `src/utils/ethiopianPhone.ts` — Enforces and converts between 10-digit (`09...` / `07...`) and 13-character (`+2519...` / `+2517...`) Ethiopian phone numbers.
+- `src/components/LoginCard.tsx` — Complete Login, Forgot PIN (Telegram OTP request), and Reset PIN component featuring your new Ethiopian taxi logo and dual phone format toggle.
 
-## Build & Deploy Commands (PowerShell)
-```powershell
-cd D:\Projects\teraye\frontend
-npm run build
+## How to Use in `App.tsx`
+1. Extract this ZIP into `D:\Projects\teraye\frontend` (so `src/utils/ethiopianPhone.ts` and `src/components/LoginCard.tsx` land inside `frontend/src/`).
+2. In `frontend/src/App.tsx`, render `<LoginCard />` when the user is logged out:
+```tsx
+import { LoginCard } from './components/LoginCard';
 
-cd ..
-git add -f backend/public frontend/
-git commit -m "feat(ui): add Teraye Ethiopian taxi logo and icons"
-git push
+// Inside App():
+if (!token) {
+  return (
+    <LoginCard
+      onLoginSuccess={(newToken, loggedInUser) => {
+        localStorage.setItem('teraye_token', newToken);
+        setToken(newToken);
+        setUser(loggedInUser);
+      }}
+    />
+  );
+}
 ```
