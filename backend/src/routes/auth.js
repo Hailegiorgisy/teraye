@@ -7,23 +7,28 @@ import { requireAuth } from '../middleware/auth.js';
 import { normalizeEthiopianPhone } from '../utils/phone.js';
 
 const router = express.Router();
+const JWT_SECRET = process.env.JWT_SECRET || 'teraye_temp_secret_2026';
 
 function signUserToken(user) {
   return jwt.sign(
-    { id: user.id, role: user.role, station_id: user.station_id },
-    process.env.JWT_SECRET,
+    {
+      id: user.id,
+      role: user.role,
+      assigned_station_id: user.assigned_station_id || null,
+    },
+    JWT_SECRET,
     { expiresIn: '30d' }
   );
 }
 
-// 1. Check current session (used by App.tsx on load)
+// 1. Check current session
 router.get('/me', requireAuth, async (req, res) => {
   try {
     if (!req.user || !req.user.id) {
       return res.json({ registered: false, telegramUser: req.telegramUser || null });
     }
     const [rows] = await pool.query(
-      'SELECT id, full_name, phone, role, station_id, telegram_id FROM teraye_users WHERE id = ? AND is_active = 1 LIMIT 1',
+      'SELECT id, full_name, phone_number, role, assigned_station_id, telegram_id FROM teraye_users WHERE id = ? AND is_active = 1 LIMIT 1',
       [req.user.id]
     );
     if (!rows[0]) {
@@ -32,35 +37,35 @@ router.get('/me', requireAuth, async (req, res) => {
     return res.json({ registered: true, user: rows[0] });
   } catch (err) {
     console.error('GET /auth/me error:', err);
-    return res.status(500).json({ error: 'Failed to load profile.' });
+    return res.status(500).json({ error: err.message });
   }
 });
 
-// 2. Temporary Dev Bypass Session (active only when DEV_BYPASS_AUTH=true in .env)
+// 2. Temporary Dev Bypass Session (active only when DEV_BYPASS_AUTH=true)
 router.get('/dev-session', async (req, res) => {
   if (process.env.DEV_BYPASS_AUTH !== 'true') {
     return res.status(403).json({ error: 'Dev bypass is disabled.' });
   }
   try {
     const [rows] = await pool.query(
-      "SELECT id, full_name, phone, role, station_id, telegram_id FROM teraye_users WHERE role = 'ADMIN' AND is_active = 1 LIMIT 1"
+      "SELECT id, full_name, phone_number, role, assigned_station_id, telegram_id FROM teraye_users WHERE role IN ('ADMIN', 'WORKER') AND is_active = 1 LIMIT 1"
     );
     const user = rows[0] || {
-      id: 1,
+      id: '00000000-0000-0000-0000-000000000001',
       full_name: 'Dev Admin',
-      phone: '+251921319216',
+      phone_number: '+251921319216',
       role: 'ADMIN',
-      station_id: 1,
+      assigned_station_id: 1,
     };
     const token = signUserToken(user);
     return res.json({ token, user });
   } catch (err) {
     console.error('GET /auth/dev-session error:', err);
-    return res.status(500).json({ error: 'Failed to create dev session.' });
+    return res.status(500).json({ error: err.message });
   }
 });
 
-// 3. Mobile / Web Browser Phone + PIN Login (accepts both phoneNumber and phone)
+// 3. Mobile / Web Browser Phone + PIN Login
 router.post(['/mobile/login', '/login'], async (req, res) => {
   try {
     const rawPhone = req.body.phoneNumber || req.body.phone;
@@ -72,7 +77,7 @@ router.post(['/mobile/login', '/login'], async (req, res) => {
     }
 
     const [rows] = await pool.query(
-      'SELECT * FROM teraye_users WHERE phone IN (?, ?) AND is_active = 1 LIMIT 1',
+      'SELECT * FROM teraye_users WHERE phone_number IN (?, ?) AND is_active = 1 LIMIT 1',
       [candidates[0], candidates[1] || candidates[0]]
     );
 
@@ -92,14 +97,14 @@ router.post(['/mobile/login', '/login'], async (req, res) => {
       user: {
         id: user.id,
         full_name: user.full_name,
-        phone: user.phone,
+        phone_number: user.phone_number,
         role: user.role,
-        station_id: user.station_id,
+        assigned_station_id: user.assigned_station_id,
       },
     });
   } catch (err) {
     console.error('POST /auth/mobile/login error:', err);
-    return res.status(500).json({ error: 'Login failed due to server error.' });
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -114,7 +119,7 @@ router.post('/forgot-pin', async (req, res) => {
     }
 
     const [rows] = await pool.query(
-      'SELECT id, full_name, telegram_id FROM teraye_users WHERE phone IN (?, ?) AND is_active = 1 LIMIT 1',
+      'SELECT id, full_name, telegram_id FROM teraye_users WHERE phone_number IN (?, ?) AND is_active = 1 LIMIT 1',
       [candidates[0], candidates[1] || candidates[0]]
     );
 
@@ -154,7 +159,7 @@ router.post('/forgot-pin', async (req, res) => {
     return res.json({ ok: true, message: '6-digit verification code sent to your Telegram.' });
   } catch (err) {
     console.error('POST /auth/forgot-pin error:', err);
-    return res.status(500).json({ error: 'Failed to request PIN reset.' });
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -170,7 +175,7 @@ router.post('/reset-pin', async (req, res) => {
     }
 
     const [rows] = await pool.query(
-      'SELECT id, reset_otp_hash, reset_otp_expires_at FROM teraye_users WHERE phone IN (?, ?) AND is_active = 1 LIMIT 1',
+      'SELECT id, reset_otp_hash, reset_otp_expires_at FROM teraye_users WHERE phone_number IN (?, ?) AND is_active = 1 LIMIT 1',
       [candidates[0], candidates[1] || candidates[0]]
     );
 
@@ -196,7 +201,7 @@ router.post('/reset-pin', async (req, res) => {
     return res.json({ ok: true, message: 'PIN updated! Sign in with your new PIN.' });
   } catch (err) {
     console.error('POST /auth/reset-pin error:', err);
-    return res.status(500).json({ error: 'Failed to reset PIN.' });
+    return res.status(500).json({ error: err.message });
   }
 });
 
