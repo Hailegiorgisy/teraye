@@ -5,7 +5,6 @@
    ```powershell
    .\apply_fixes.ps1
    ```
-   This safely patches `frontend/src/components/AuthScreen.tsx` (`/auth/mobile/login` -> `/auth/login`) and `backend/sql/002_seed.sql` (`+2519121319216` -> `+251921319216`) in-place without touching Amharic Unicode text, untracks `backend/.env`, and rebuilds `frontend/` into `backend/public/`.
 3. Commit and push:
    ```bash
    git add backend/src/app.js backend/src/middleware/auth.js backend/.env.example backend/sql/ frontend/src/components/AuthScreen.tsx backend/public

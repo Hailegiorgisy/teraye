@@ -95,7 +95,7 @@ const server = app.listen(PORT, async () => {
   if (bot) {
     try {
       if (isProd && process.env.PUBLIC_API_URL) {
-        const fullWebhookUrl = `${process.env.PUBLIC_API_URL.replace(/\\/$/, '')}${webhookPath}`;
+        const fullWebhookUrl = `${process.env.PUBLIC_API_URL.replace(/\/$/, '')}${webhookPath}`;
         await bot.telegram.setWebhook(fullWebhookUrl);
         console.log(`🤖 Telegram Bot webhook registered: ${fullWebhookUrl}`);
       } else {
