@@ -125,6 +125,18 @@ async function shutdown(signal) {
     process.exit(0);
   });
 }
-
+return res.status(503).json({
+  status: 'error',
+  database: 'unreachable',
+  detail: err.message,
+  code: err.code,
+  debug: {
+    host: process.env.DB_HOST,
+    port: process.env.DB_PORT,
+    db: process.env.DB_NAME,
+    user: process.env.DB_USER,
+    pwLen: process.env.DB_PASSWORD ? process.env.DB_PASSWORD.length : 0,
+  },
+});
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
