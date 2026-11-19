@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import express from 'express';
@@ -5,6 +6,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import dotenv from 'dotenv';
 import { pool } from './config/db.js';
+import authRoutes from './routes/auth.js';
 import authRoutes from './routes/auth.routes.js';
 import stationRoutes from './routes/stations.routes.js';
 import queueRoutes from './routes/queue.routes.js';

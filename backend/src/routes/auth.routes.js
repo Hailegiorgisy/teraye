@@ -6,6 +6,7 @@ import { query, withTransaction } from '../config/db.js';
 import { requireAuth, requireRegisteredUser } from '../middleware/auth.js';
 
 const router = Router();
+const JWT_SECRET = process.env.JWT_SECRET || 'teraye_temp_secret_2026';
 
 function normalizeEthPhone(raw) {
   if (!raw) return null;
@@ -18,6 +19,13 @@ function normalizeEthPhone(raw) {
   return null;
 }
 
+function getPhoneCandidates(raw) {
+  const intl = normalizeEthPhone(raw);
+  if (!intl) return [];
+  const local = '0' + intl.slice(4);
+  return [intl, local];
+}
+
 function normalizePlate(raw) {
   if (!raw) return null;
   return String(raw).trim().toUpperCase().replace(/\s+/g, '-');
@@ -26,10 +34,37 @@ function normalizePlate(raw) {
 function signUserToken(user) {
   return jwt.sign(
     { userId: user.id, role: user.role },
-    process.env.JWT_SECRET,
+    JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN || '30d' }
   );
 }
+
+/**
+ * 0. GET /api/auth/dev-session (Temporary Dev Bypass when DEV_BYPASS_AUTH=true)
+ */
+router.get('/dev-session', async (req, res) => {
+  if (process.env.DEV_BYPASS_AUTH !== 'true') {
+    return res.status(403).json({ error: 'Dev bypass is disabled.' });
+  }
+  try {
+    const dbRes = await query(
+      "SELECT id, telegram_id, phone_number, full_name, role, assigned_station_id, is_active FROM teraye_users WHERE role IN ('ADMIN', 'WORKER') AND is_active = 1 LIMIT 1"
+    );
+    const user = dbRes.rows[0] || {
+      id: '00000000-0000-0000-0000-000000000001',
+      full_name: 'Dev Admin',
+      phone_number: '+251921319216',
+      role: 'ADMIN',
+      assigned_station_id: 1,
+      is_active: 1,
+    };
+    const token = signUserToken(user);
+    return res.json({ token, user });
+  } catch (err) {
+    console.error('[GET /api/auth/dev-session Error]:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 /**
  * 1. GET /api/auth/me
@@ -69,7 +104,7 @@ router.get('/me', requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error('[GET /api/auth/me Error]:', err);
-    return res.status(500).json({ error: 'Failed to load profile.' });
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -181,25 +216,25 @@ router.post('/telegram/register', requireAuth, async (req, res) => {
       });
     }
     console.error('[POST /api/auth/telegram/register Error]:', err);
-    return res.status(500).json({ error: 'Registration failed.' });
+    return res.status(500).json({ error: err.message });
   }
 });
 
 /**
- * 3. POST /api/auth/mobile/login
+ * 3. POST /api/auth/mobile/login (Matches both +251... and 09/07... in MySQL)
  */
 router.post('/mobile/login', async (req, res) => {
   try {
-    const phone = normalizeEthPhone(req.body.phoneNumber);
+    const candidates = getPhoneCandidates(req.body.phoneNumber || req.body.phone);
     const pin = String(req.body.pin || '').trim();
 
-    if (!phone || !pin) {
-      return res.status(400).json({ error: 'Phone number and PIN are required.' });
+    if (!candidates.length || !pin) {
+      return res.status(400).json({ error: 'Valid Ethiopian phone number and PIN are required.' });
     }
 
     const dbRes = await query(
-      'SELECT * FROM teraye_users WHERE phone_number = ? LIMIT 1',
-      [phone]
+      'SELECT * FROM teraye_users WHERE phone_number IN (?, ?) LIMIT 1',
+      [candidates[0], candidates[1]]
     );
 
     if (dbRes.rows.length === 0) {
@@ -227,7 +262,7 @@ router.post('/mobile/login', async (req, res) => {
     return res.json({ token, user });
   } catch (err) {
     console.error('[POST /api/auth/mobile/login Error]:', err);
-    return res.status(500).json({ error: 'Login failed.' });
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -250,7 +285,104 @@ router.post('/mobile/set-pin', requireAuth, requireRegisteredUser, async (req, r
     return res.json({ success: true, message: 'Mobile App PIN saved.' });
   } catch (err) {
     console.error('[POST /api/auth/mobile/set-pin Error]:', err);
-    return res.status(500).json({ error: 'Failed to set PIN.' });
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * 5. POST /api/auth/forgot-pin (Send 6-digit OTP via Telegram)
+ */
+router.post('/forgot-pin', async (req, res) => {
+  try {
+    const candidates = getPhoneCandidates(req.body.phoneNumber || req.body.phone);
+    if (!candidates.length) {
+      return res.status(400).json({ error: 'Enter a valid Ethiopian phone number.' });
+    }
+
+    const dbRes = await query(
+      'SELECT id, full_name, telegram_id FROM teraye_users WHERE phone_number IN (?, ?) AND is_active = 1 LIMIT 1',
+      [candidates[0], candidates[1]]
+    );
+    const user = dbRes.rows[0];
+    if (!user) {
+      return res.status(404).json({ error: 'No active account found with that phone number.' });
+    }
+    if (!user.telegram_id) {
+      return res.status(400).json({
+        error: 'No Telegram account linked. Open the Teraye Telegram bot first or contact an Admin.',
+      });
+    }
+
+    const otp = String(crypto.randomInt(100000, 999999));
+    const otpHash = await bcrypt.hash(otp, 10);
+
+    await query(
+      'UPDATE teraye_users SET reset_otp_hash = ?, reset_otp_expires_at = DATE_ADD(NOW(), INTERVAL 10 MINUTE) WHERE id = ?',
+      [otpHash, user.id]
+    );
+
+    const botToken = process.env.TELEGRAM_BOT_TOKEN;
+    const tgRes = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: user.telegram_id,
+        text: `🔐 *Teraye (ተራየ) PIN Reset*\n\nHello ${user.full_name || 'User'}, your verification code is:\n\n\`${otp}\`\n\nExpires in 10 minutes.`,
+        parse_mode: 'Markdown',
+      }),
+    });
+
+    if (!tgRes.ok) {
+      return res.status(502).json({ error: 'Could not send Telegram code. Start the bot first.' });
+    }
+
+    return res.json({ ok: true, message: '6-digit verification code sent to your Telegram.' });
+  } catch (err) {
+    console.error('[POST /api/auth/forgot-pin Error]:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * 6. POST /api/auth/reset-pin (Verify Telegram OTP & Save New PIN)
+ */
+router.post('/reset-pin', async (req, res) => {
+  try {
+    const candidates = getPhoneCandidates(req.body.phoneNumber || req.body.phone);
+    const otp = String(req.body.otp || '').trim();
+    const newPin = String(req.body.newPin || '').trim();
+
+    if (!candidates.length || !/^\d{6}$/.test(otp) || !/^\d{4,6}$/.test(newPin)) {
+      return res.status(400).json({ error: 'Phone, 6-digit code, and 4–6 digit new PIN are required.' });
+    }
+
+    const dbRes = await query(
+      'SELECT id, reset_otp_hash, reset_otp_expires_at FROM teraye_users WHERE phone_number IN (?, ?) AND is_active = 1 LIMIT 1',
+      [candidates[0], candidates[1]]
+    );
+    const user = dbRes.rows[0];
+    if (!user || !user.reset_otp_hash || !user.reset_otp_expires_at) {
+      return res.status(400).json({ error: 'No active reset request. Request a new code.' });
+    }
+    if (new Date(user.reset_otp_expires_at) < new Date()) {
+      return res.status(400).json({ error: 'Verification code expired. Request a new code.' });
+    }
+
+    const validOtp = await bcrypt.compare(otp, user.reset_otp_hash);
+    if (!validOtp) {
+      return res.status(401).json({ error: 'Incorrect verification code.' });
+    }
+
+    const newPinHash = await bcrypt.hash(newPin, 10);
+    await query(
+      'UPDATE teraye_users SET pin_hash = ?, reset_otp_hash = NULL, reset_otp_expires_at = NULL WHERE id = ?',
+      [newPinHash, user.id]
+    );
+
+    return res.json({ ok: true, message: 'PIN updated! Sign in with your new PIN.' });
+  } catch (err) {
+    console.error('[POST /api/auth/reset-pin Error]:', err);
+    return res.status(500).json({ error: err.message });
   }
 });
 
