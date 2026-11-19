@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { Router } from 'express';
 import { query, withTransaction } from '../config/db.js';
 import {
@@ -8,17 +9,11 @@ import {
 
 const router = Router();
 
-/**
- * Helper: Normalizes plate numbers (e.g., "aa 3 a45219" -> "AA-3-A45219")
- */
 function normalizePlate(raw) {
   if (!raw) return null;
   return String(raw).trim().toUpperCase().replace(/\s+/g, '-');
 }
 
-/**
- * Helper: Normalizes Ethiopian phone numbers to +2519XXXXXXXX or +2517XXXXXXXX
- */
 function normalizeEthPhone(raw) {
   if (!raw) return null;
   const digits = String(raw).replace(/\D/g, '');
@@ -32,26 +27,23 @@ function normalizeEthPhone(raw) {
 
 /**
  * 1. GET /api/stations
- * Public/Shared endpoint: Returns all active stations and their active routes
- * in one compact payload (also used during first-time driver onboarding).
  */
 router.get('/', async (req, res) => {
   try {
     const stationsRes = await query(
       `SELECT id, name_am, name_en, sub_city
-       FROM stations
+       FROM teraye_stations
        WHERE is_active = TRUE
        ORDER BY name_en ASC`
     );
 
     const routesRes = await query(
       `SELECT id, origin_station_id, destination_am, destination_en, route_code
-       FROM routes
+       FROM teraye_routes
        WHERE is_active = TRUE
        ORDER BY destination_en ASC`
     );
 
-    // Group routes under their origin station in memory (1 fast DB round-trip)
     const routesByStation = new Map();
     for (const r of routesRes.rows) {
       if (!routesByStation.has(r.origin_station_id)) {
@@ -74,7 +66,6 @@ router.get('/', async (req, res) => {
 
 /**
  * 2. POST /api/stations
- * Admin-only: Create a new taxi terminal.
  */
 router.post(
   '/',
@@ -93,14 +84,18 @@ router.post(
           .json({ error: 'Both Amharic (nameAm) and English (nameEn) station names are required.' });
       }
 
-      const result = await query(
-        `INSERT INTO stations (name_am, name_en, sub_city)
-         VALUES ($1, $2, $3)
-         RETURNING id, name_am, name_en, sub_city, is_active`,
+      const { rows: insertInfo } = await query(
+        `INSERT INTO teraye_stations (name_am, name_en, sub_city)
+         VALUES (?, ?, ?)`,
         [nameAm, nameEn, subCity]
       );
 
-      return res.status(201).json({ station: result.rows[0] });
+      const stationRes = await query(
+        'SELECT id, name_am, name_en, sub_city, is_active FROM teraye_stations WHERE id = ? LIMIT 1',
+        [insertInfo.insertId]
+      );
+
+      return res.status(201).json({ station: stationRes.rows[0] });
     } catch (err) {
       console.error('[POST /api/stations Error]:', err);
       return res.status(500).json({ error: 'Failed to create station.' });
@@ -110,7 +105,6 @@ router.post(
 
 /**
  * 3. POST /api/stations/:stationId/routes
- * Admin-only: Add a destination corridor departing from a station.
  */
 router.post(
   '/:stationId/routes',
@@ -130,16 +124,20 @@ router.post(
         });
       }
 
-      const result = await query(
-        `INSERT INTO routes (origin_station_id, destination_am, destination_en, route_code)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id, origin_station_id, destination_am, destination_en, route_code, is_active`,
+      const { rows: insertInfo } = await query(
+        `INSERT INTO teraye_routes (origin_station_id, destination_am, destination_en, route_code)
+         VALUES (?, ?, ?, ?)`,
         [stationId, destinationAm, destinationEn, routeCode]
       );
 
-      return res.status(201).json({ route: result.rows[0] });
+      const routeRes = await query(
+        'SELECT id, origin_station_id, destination_am, destination_en, route_code, is_active FROM teraye_routes WHERE id = ? LIMIT 1',
+        [insertInfo.insertId]
+      );
+
+      return res.status(201).json({ route: routeRes.rows[0] });
     } catch (err) {
-      if (err.code === '23505') {
+      if (err.code === 'ER_DUP_ENTRY') {
         return res.status(409).json({ error: 'Route code already exists.' });
       }
       console.error('[POST /api/stations/:stationId/routes Error]:', err);
@@ -150,7 +148,6 @@ router.post(
 
 /**
  * 4. GET /api/stations/taxis/search?q=45219  OR  ?qrToken=<uuid>
- * Used by Station Marshals for instant plate lookup or QR sticker scan.
  */
 router.get(
   '/taxis/search',
@@ -167,10 +164,10 @@ router.get(
           `SELECT t.id, t.plate_number, t.default_route_id, t.qr_token, t.status,
                   u.full_name AS driver_name, u.phone_number AS driver_phone,
                   r.destination_am, r.destination_en, r.route_code
-           FROM taxis t
-           LEFT JOIN users u ON u.id = t.driver_user_id
-           LEFT JOIN routes r ON r.id = t.default_route_id
-           WHERE t.qr_token = $1
+           FROM teraye_taxis t
+           LEFT JOIN teraye_users u ON u.id = t.driver_user_id
+           LEFT JOIN teraye_routes r ON r.id = t.default_route_id
+           WHERE t.qr_token = ?
            LIMIT 1`,
           [qrToken]
         );
@@ -185,10 +182,10 @@ router.get(
         `SELECT t.id, t.plate_number, t.default_route_id, t.qr_token, t.status,
                 u.full_name AS driver_name, u.phone_number AS driver_phone,
                 r.destination_am, r.destination_en, r.route_code
-         FROM taxis t
-         LEFT JOIN users u ON u.id = t.driver_user_id
-         LEFT JOIN routes r ON r.id = t.default_route_id
-         WHERE t.plate_number ILIKE $1
+         FROM teraye_taxis t
+         LEFT JOIN teraye_users u ON u.id = t.driver_user_id
+         LEFT JOIN teraye_routes r ON r.id = t.default_route_id
+         WHERE t.plate_number LIKE ?
          ORDER BY t.plate_number ASC
          LIMIT 20`,
         [`%${q}%`]
@@ -204,7 +201,6 @@ router.get(
 
 /**
  * 5. POST /api/stations/taxis
- * Worker / Admin: Register a new taxi on the spot at the terminal.
  */
 router.post(
   '/taxis',
@@ -228,9 +224,8 @@ router.post(
       }
 
       const created = await withTransaction(async (client) => {
-        // 1. Find or create the driver user account by phone number
-        let userRes = await client.query(
-          'SELECT id, full_name, phone_number FROM users WHERE phone_number = $1 LIMIT 1',
+        const userRes = await client.query(
+          'SELECT id, full_name, phone_number FROM teraye_users WHERE phone_number = ? LIMIT 1',
           [driverPhone]
         );
 
@@ -238,21 +233,26 @@ router.post(
         if (userRes.rows.length > 0) {
           driverUser = userRes.rows[0];
         } else {
-          const newUser = await client.query(
-            `INSERT INTO users (phone_number, full_name, role)
-             VALUES ($1, $2, 'DRIVER')
-             RETURNING id, full_name, phone_number`,
-            [driverPhone, driverName]
+          const newUserId = crypto.randomUUID();
+          await client.query(
+            `INSERT INTO teraye_users (id, phone_number, full_name, role)
+             VALUES (?, ?, ?, 'DRIVER')`,
+            [newUserId, driverPhone, driverName]
           );
-          driverUser = newUser.rows[0];
+          driverUser = { id: newUserId, full_name: driverName, phone_number: driverPhone };
         }
 
-        // 2. Insert the new taxi and generate its unique QR token
+        const newTaxiId = crypto.randomUUID();
+        const newQrToken = crypto.randomUUID();
+        await client.query(
+          `INSERT INTO teraye_taxis (id, plate_number, driver_user_id, default_route_id, qr_token)
+           VALUES (?, ?, ?, ?, ?)`,
+          [newTaxiId, plate, driverUser.id, defaultRouteId, newQrToken]
+        );
+
         const taxiRes = await client.query(
-          `INSERT INTO taxis (plate_number, driver_user_id, default_route_id)
-           VALUES ($1, $2, $3)
-           RETURNING id, plate_number, driver_user_id, default_route_id, qr_token, status, created_at`,
-          [plate, driverUser.id, defaultRouteId]
+          'SELECT id, plate_number, driver_user_id, default_route_id, qr_token, status, created_at FROM teraye_taxis WHERE id = ? LIMIT 1',
+          [newTaxiId]
         );
 
         return {
@@ -263,7 +263,7 @@ router.post(
 
       return res.status(201).json(created);
     } catch (err) {
-      if (err.code === '23505') {
+      if (err.code === 'ER_DUP_ENTRY') {
         return res.status(409).json({ error: 'A taxi with this plate number is already registered.' });
       }
       console.error('[POST /api/stations/taxis Error]:', err);

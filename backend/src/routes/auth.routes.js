@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -6,9 +7,6 @@ import { requireAuth, requireRegisteredUser } from '../middleware/auth.js';
 
 const router = Router();
 
-/**
- * Helper: Normalizes Ethiopian phone numbers to +2519XXXXXXXX or +2517XXXXXXXX
- */
 function normalizeEthPhone(raw) {
   if (!raw) return null;
   const digits = String(raw).replace(/\D/g, '');
@@ -20,17 +18,11 @@ function normalizeEthPhone(raw) {
   return null;
 }
 
-/**
- * Helper: Normalizes plate numbers (e.g., "aa 3 a45219" -> "AA-3-A45219")
- */
 function normalizePlate(raw) {
   if (!raw) return null;
   return String(raw).trim().toUpperCase().replace(/\s+/g, '-');
 }
 
-/**
- * Helper: Issues a signed JWT for Mobile App / Web sessions
- */
 function signUserToken(user) {
   return jwt.sign(
     { userId: user.id, role: user.role },
@@ -41,11 +33,9 @@ function signUserToken(user) {
 
 /**
  * 1. GET /api/auth/me
- * Called immediately when either the Telegram Mini App or Mobile App opens.
  */
 router.get('/me', requireAuth, async (req, res) => {
   try {
-    // Valid Telegram Mini App signature, but user is not in `users` table yet
     if (!req.user && req.telegramUser) {
       return res.json({
         registered: false,
@@ -58,15 +48,14 @@ router.get('/me', requireAuth, async (req, res) => {
       });
     }
 
-    // Fetch linked taxi details if user is a DRIVER
     let taxi = null;
     if (req.user.role === 'DRIVER') {
       const taxiRes = await query(
         `SELECT t.id, t.plate_number, t.default_route_id, t.qr_token, t.status,
                 r.destination_am, r.destination_en, r.route_code
-         FROM taxis t
-         LEFT JOIN routes r ON r.id = t.default_route_id
-         WHERE t.driver_user_id = $1
+         FROM teraye_taxis t
+         LEFT JOIN teraye_routes r ON r.id = t.default_route_id
+         WHERE t.driver_user_id = ?
          LIMIT 1`,
         [req.user.id]
       );
@@ -86,8 +75,6 @@ router.get('/me', requireAuth, async (req, res) => {
 
 /**
  * 2. POST /api/auth/telegram/register
- * First-time Telegram Mini App onboarding.
- * Links Telegram ID to +251 phone number (and claims pre-registered taxi if a marshal already added it!).
  */
 router.post('/telegram/register', requireAuth, async (req, res) => {
   try {
@@ -111,62 +98,69 @@ router.post('/telegram/register', requireAuth, async (req, res) => {
     }
 
     const result = await withTransaction(async (client) => {
-      // Check if a station marshal already created a user record with this phone number
       const existingUserRes = await client.query(
-        'SELECT * FROM users WHERE phone_number = $1 LIMIT 1',
+        'SELECT * FROM teraye_users WHERE phone_number = ? LIMIT 1',
         [phone]
       );
 
-      let user;
+      let userId;
       if (existingUserRes.rows.length > 0) {
-        // Link Telegram ID to the existing record created by the marshal
-        const updated = await client.query(
-          `UPDATE users
-           SET telegram_id = $1, full_name = COALESCE(NULLIF($2, ''), full_name), updated_at = NOW()
-           WHERE id = $3
-           RETURNING id, telegram_id, phone_number, full_name, role, assigned_station_id, is_active`,
-          [req.telegramUser.id, fullName, existingUserRes.rows[0].id]
+        userId = existingUserRes.rows[0].id;
+        await client.query(
+          `UPDATE teraye_users
+           SET telegram_id = ?, full_name = COALESCE(NULLIF(?, ''), full_name)
+           WHERE id = ?`,
+          [req.telegramUser.id, fullName, userId]
         );
-        user = updated.rows[0];
       } else {
-        // Create brand-new DRIVER account
-        const inserted = await client.query(
-          `INSERT INTO users (telegram_id, phone_number, full_name, role)
-           VALUES ($1, $2, $3, 'DRIVER')
-           RETURNING id, telegram_id, phone_number, full_name, role, assigned_station_id, is_active`,
-          [req.telegramUser.id, phone, fullName]
+        userId = crypto.randomUUID();
+        await client.query(
+          `INSERT INTO teraye_users (id, telegram_id, phone_number, full_name, role)
+           VALUES (?, ?, ?, ?, 'DRIVER')`,
+          [userId, req.telegramUser.id, phone, fullName]
         );
-        user = inserted.rows[0];
       }
 
-      // If plate number provided, link or create taxi record
+      const userRes = await client.query(
+        'SELECT id, telegram_id, phone_number, full_name, role, assigned_station_id, is_active FROM teraye_users WHERE id = ? LIMIT 1',
+        [userId]
+      );
+      const user = userRes.rows[0];
+
       let taxi = null;
       if (plate && user.role === 'DRIVER') {
         const taxiCheck = await client.query(
-          'SELECT * FROM taxis WHERE plate_number = $1 LIMIT 1',
+          'SELECT * FROM teraye_taxis WHERE plate_number = ? LIMIT 1',
           [plate]
         );
 
         if (taxiCheck.rows.length > 0) {
-          // Attach driver to existing taxi if not owned by someone else
           const existingTaxi = taxiCheck.rows[0];
           if (existingTaxi.driver_user_id && existingTaxi.driver_user_id !== user.id) {
             throw new Error('PLATE_ALREADY_CLAIMED');
           }
-          const linked = await client.query(
-            `UPDATE taxis
-             SET driver_user_id = $1, default_route_id = COALESCE($2, default_route_id)
-             WHERE id = $3
-             RETURNING *`,
+          await client.query(
+            `UPDATE teraye_taxis
+             SET driver_user_id = ?, default_route_id = COALESCE(?, default_route_id)
+             WHERE id = ?`,
             [user.id, defaultRouteId, existingTaxi.id]
           );
-          taxi = linked.rows[0];
+          const updatedTaxi = await client.query(
+            'SELECT * FROM teraye_taxis WHERE id = ? LIMIT 1',
+            [existingTaxi.id]
+          );
+          taxi = updatedTaxi.rows[0];
         } else {
+          const newTaxiId = crypto.randomUUID();
+          const newQrToken = crypto.randomUUID();
+          await client.query(
+            `INSERT INTO teraye_taxis (id, plate_number, driver_user_id, default_route_id, qr_token)
+             VALUES (?, ?, ?, ?, ?)`,
+            [newTaxiId, plate, user.id, defaultRouteId, newQrToken]
+          );
           const createdTaxi = await client.query(
-            `INSERT INTO taxis (plate_number, driver_user_id, default_route_id)
-             VALUES ($1, $2, $3)
-             RETURNING *`,
-            [plate, user.id, defaultRouteId]
+            'SELECT * FROM teraye_taxis WHERE id = ? LIMIT 1',
+            [newTaxiId]
           );
           taxi = createdTaxi.rows[0];
         }
@@ -193,7 +187,6 @@ router.post('/telegram/register', requireAuth, async (req, res) => {
 
 /**
  * 3. POST /api/auth/mobile/login
- * Standalone Mobile App (Android APK / PWA) login using +251 phone number + PIN.
  */
 router.post('/mobile/login', async (req, res) => {
   try {
@@ -205,7 +198,7 @@ router.post('/mobile/login', async (req, res) => {
     }
 
     const dbRes = await query(
-      'SELECT * FROM users WHERE phone_number = $1 LIMIT 1',
+      'SELECT * FROM teraye_users WHERE phone_number = ? LIMIT 1',
       [phone]
     );
 
@@ -229,7 +222,7 @@ router.post('/mobile/login', async (req, res) => {
     }
 
     const token = signUserToken(user);
-    delete user.pin_hash; // Never return password/PIN hash to client
+    delete user.pin_hash;
 
     return res.json({ token, user });
   } catch (err) {
@@ -240,8 +233,6 @@ router.post('/mobile/login', async (req, res) => {
 
 /**
  * 4. POST /api/auth/mobile/set-pin
- * Allows an authenticated user (via Telegram Mini App or existing Mobile session)
- * to set a 4–6 digit PIN for standalone Mobile App login.
  */
 router.post('/mobile/set-pin', requireAuth, requireRegisteredUser, async (req, res) => {
   try {
@@ -252,7 +243,7 @@ router.post('/mobile/set-pin', requireAuth, requireRegisteredUser, async (req, r
 
     const pinHash = await bcrypt.hash(pin, 10);
     await query(
-      'UPDATE users SET pin_hash = $1, updated_at = NOW() WHERE id = $2',
+      'UPDATE teraye_users SET pin_hash = ? WHERE id = ?',
       [pinHash, req.user.id]
     );
 

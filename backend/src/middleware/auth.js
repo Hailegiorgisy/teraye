@@ -77,7 +77,7 @@ export async function requireAuth(req, res, next) {
       }
 
       const dbRes = await query(
-        'SELECT id, telegram_id, phone_number, full_name, role, assigned_station_id, is_active FROM users WHERE telegram_id = $1 LIMIT 1',
+        'SELECT id, telegram_id, phone_number, full_name, role, assigned_station_id, is_active FROM teraye_users WHERE telegram_id = ? LIMIT 1',
         [tgUser.id]
       );
 
@@ -103,7 +103,7 @@ export async function requireAuth(req, res, next) {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
       const dbRes = await query(
-        'SELECT id, telegram_id, phone_number, full_name, role, assigned_station_id, is_active FROM users WHERE id = $1 LIMIT 1',
+        'SELECT id, telegram_id, phone_number, full_name, role, assigned_station_id, is_active FROM teraye_users WHERE id = ? LIMIT 1',
         [decoded.userId]
       );
 
@@ -123,7 +123,7 @@ export async function requireAuth(req, res, next) {
 }
 
 /**
- * Ensures the authenticated user has completed registration in `users` table
+ * Ensures the authenticated user has completed registration in `teraye_users` table
  */
 export function requireRegisteredUser(req, res, next) {
   if (!req.user) {

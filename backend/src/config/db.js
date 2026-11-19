@@ -1,58 +1,58 @@
-import pg from 'pg';
+import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const { Pool } = pg;
-
-// 1. PostgreSQL Connection Pool
-export const pool = new Pool({
+export const pool = mysql.createPool({
   host: process.env.DB_HOST || '127.0.0.1',
-  port: Number(process.env.DB_PORT) || 5432,
-  database: process.env.DB_NAME || 'teraye_db',
-  user: process.env.DB_USER || 'teraye_user',
+  port: Number(process.env.DB_PORT) || 3306,
+  database: process.env.DB_NAME,
+  user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
-  max: 15,                       // Maximum simultaneous connections (safe for Plesk VPS)
-  idleTimeoutMillis: 30000,      // Close idle connections after 30s
-  connectionTimeoutMillis: 5000, // Fail fast (5s) if DB is unreachable
+  waitForConnections: true,
+  connectionLimit: 15,
+  queueLimit: 0,
+  timezone: 'Z',
 });
 
-// Log unexpected pool errors so Plesk/PM2 captures them cleanly
-pool.on('error', (err) => {
-  console.error('[DB Pool Error] Unexpected PostgreSQL error:', err);
-});
+// Simple Query Helper (returns { rows } to stay consistent across routes)
+export async function query(sql, params = []) {
+  const [rows] = await pool.execute(sql, params);
+  return { rows };
+}
 
-// 2. Simple Query Helper (for standard SELECT / INSERT / UPDATE)
-export const query = (text, params) => pool.query(text, params);
-
-// 3. Atomic Transaction Helper (for Check-In, Dispatch, & Re-Queue)
+// Atomic Transaction Helper (for Check-In, Dispatch, & Re-Queue)
 export async function withTransaction(callback) {
-  const client = await pool.connect();
+  const conn = await pool.getConnection();
   try {
-    await client.query('BEGIN');
+    await conn.beginTransaction();
+    // Wrap conn.execute so callback can call client.query(sql, params) identically
+    const client = {
+      query: async (sql, params = []) => {
+        const [rows] = await conn.execute(sql, params);
+        return { rows };
+      },
+    };
     const result = await callback(client);
-    await client.query('COMMIT');
+    await conn.commit();
     return result;
   } catch (err) {
-    await client.query('ROLLBACK');
+    await conn.rollback();
     throw err;
   } finally {
-    client.release();
+    conn.release();
   }
 }
 
-// 4. Dynamic Runtime Setting Loader (DB override -> .env fallback)
 export async function getSetting(key, fallbackValue = null) {
   try {
-    const res = await pool.query(
-      'SELECT value FROM system_settings WHERE key = $1 LIMIT 1',
+    const { rows } = await query(
+      'SELECT setting_value FROM teraye_system_settings WHERE setting_key = ? LIMIT 1',
       [key]
     );
-    if (res.rows.length > 0) {
-      return res.rows[0].value;
-    }
-  } catch (err) {
-    console.warn(`[Config] Failed reading setting "${key}" from DB, using .env fallback.`);
+    if (rows.length > 0) return rows[0].setting_value;
+  } catch {
+    // Fallback to .env
   }
   return process.env[key] ?? fallbackValue;
 }

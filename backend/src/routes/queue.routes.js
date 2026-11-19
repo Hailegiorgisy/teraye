@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { Router } from 'express';
 import { query, withTransaction, getSetting } from '../config/db.js';
 import {
@@ -9,21 +10,18 @@ import { notifyDriverTurn } from '../bot/bot.js';
 
 const router = Router();
 
-/**
- * Helper: Fetches top 2 waiting taxis on a station+route and sends Telegram Bot alerts
- */
 async function triggerTopTwoNotifications(stationId, routeId) {
   try {
     const topRes = await query(
       `SELECT qe.id, t.plate_number, u.telegram_id,
               s.name_en AS station_name, r.destination_en AS destination_name
-       FROM queue_entries qe
-       JOIN taxis t ON t.id = qe.taxi_id
-       LEFT JOIN users u ON u.id = t.driver_user_id
-       JOIN stations s ON s.id = qe.station_id
-       JOIN routes r ON r.id = qe.route_id
-       WHERE qe.station_id = $1
-         AND qe.route_id = $2
+       FROM teraye_queue_entries qe
+       JOIN teraye_taxis t ON t.id = qe.taxi_id
+       LEFT JOIN teraye_users u ON u.id = t.driver_user_id
+       JOIN teraye_stations s ON s.id = qe.station_id
+       JOIN teraye_routes r ON r.id = qe.route_id
+       WHERE qe.station_id = ?
+         AND qe.route_id = ?
          AND qe.status IN ('WAITING', 'LOADING')
        ORDER BY qe.arrived_at ASC
        LIMIT 2`,
@@ -35,7 +33,7 @@ async function triggerTopTwoNotifications(stationId, routeId) {
       if (row.telegram_id) {
         await notifyDriverTurn(row.telegram_id, {
           plateNumber: row.plate_number,
-          position: i + 1, // 1 = Your turn, 2 = Get ready
+          position: i + 1,
           stationName: row.station_name,
           destinationName: row.destination_name,
         });
@@ -47,9 +45,7 @@ async function triggerTopTwoNotifications(stationId, routeId) {
 }
 
 /**
- * 1. POST /api/queue/check-in  (Station Worker / Admin)
- * "Tick Arrival" — Adds a taxi to the FIFO queue.
- * Supports dynamic route selection (`routeId`) if traffic/demand forces a route change.
+ * 1. POST /api/queue/check-in
  */
 router.post(
   '/check-in',
@@ -65,7 +61,6 @@ router.post(
         return res.status(400).json({ error: 'taxiId and stationId are required.' });
       }
 
-      // Workers can only check taxis into their own assigned terminal
       if (
         req.user.role === 'WORKER' &&
         req.user.assigned_station_id &&
@@ -75,41 +70,41 @@ router.post(
       }
 
       const created = await withTransaction(async (client) => {
-        // 1. Verify taxi exists and is active
         const taxiRes = await client.query(
-          'SELECT id, plate_number, default_route_id, status FROM taxis WHERE id = $1 LIMIT 1',
+          'SELECT id, plate_number, default_route_id, status FROM teraye_taxis WHERE id = ? LIMIT 1',
           [taxiId]
         );
         if (taxiRes.rows.length === 0) throw new Error('TAXI_NOT_FOUND');
         const taxi = taxiRes.rows[0];
         if (taxi.status !== 'ACTIVE') throw new Error('TAXI_SUSPENDED');
 
-        // 2. Use provided routeId (if redirected) or fall back to taxi's default route
         const activeRouteId = Number(overrideRouteId || taxi.default_route_id);
         if (!activeRouteId) throw new Error('ROUTE_REQUIRED');
 
-        // Verify route belongs to this station
         const routeCheck = await client.query(
-          'SELECT id FROM routes WHERE id = $1 AND origin_station_id = $2 AND is_active = TRUE LIMIT 1',
+          'SELECT id FROM teraye_routes WHERE id = ? AND origin_station_id = ? AND is_active = TRUE LIMIT 1',
           [activeRouteId, stationId]
         );
         if (routeCheck.rows.length === 0) throw new Error('INVALID_ROUTE_FOR_STATION');
 
-        // 3. Insert into queue_entries (DB partial unique index blocks duplicates automatically)
-        const insertRes = await client.query(
-          `INSERT INTO queue_entries (taxi_id, station_id, route_id, checked_in_by, status)
-           VALUES ($1, $2, $3, $4, 'WAITING')
-           RETURNING *`,
-          [taxi.id, stationId, activeRouteId, req.user.id]
+        const entryId = crypto.randomUUID();
+        await client.query(
+          `INSERT INTO teraye_queue_entries (id, taxi_id, station_id, route_id, checked_in_by, status)
+           VALUES (?, ?, ?, ?, ?, 'WAITING')`,
+          [entryId, taxi.id, stationId, activeRouteId, req.user.id]
         );
-        const entry = insertRes.rows[0];
 
-        // 4. Write audit log
+        const entryRes = await client.query(
+          'SELECT * FROM teraye_queue_entries WHERE id = ? LIMIT 1',
+          [entryId]
+        );
+        const entry = entryRes.rows[0];
+
         const isRouteSwitched =
           taxi.default_route_id && taxi.default_route_id !== activeRouteId;
         await client.query(
-          `INSERT INTO queue_audit_logs (queue_entry_id, action_by, action_type, notes)
-           VALUES ($1, $2, $3, $4)`,
+          `INSERT INTO teraye_queue_audit_logs (queue_entry_id, action_by, action_type, notes)
+           VALUES (?, ?, ?, ?)`,
           [
             entry.id,
             req.user.id,
@@ -118,20 +113,23 @@ router.post(
           ]
         );
 
-        // 5. Compute immediate FIFO rank for this vehicle
         const rankRes = await client.query(
-          `SELECT COUNT(*)::int AS rank
-           FROM queue_entries
-           WHERE station_id = $1 AND route_id = $2
+          `SELECT COUNT(*) AS rank_pos
+           FROM teraye_queue_entries
+           WHERE station_id = ? AND route_id = ?
              AND status IN ('WAITING', 'LOADING')
-             AND arrived_at <= $3`,
+             AND arrived_at <= ?`,
           [stationId, activeRouteId, entry.arrived_at]
         );
 
-        return { entry, rank: rankRes.rows[0].rank, stationId, routeId: activeRouteId };
+        return {
+          entry,
+          rank: Number(rankRes.rows[0].rank_pos),
+          stationId,
+          routeId: activeRouteId,
+        };
       });
 
-      // Notify if this taxi just entered directly at #1 or #2 (empty/short queue)
       if (created.rank <= 2) {
         triggerTopTwoNotifications(created.stationId, created.routeId);
       }
@@ -141,7 +139,7 @@ router.post(
         position: created.rank,
       });
     } catch (err) {
-      if (err.code === '23505') {
+      if (err.code === 'ER_DUP_ENTRY') {
         return res.status(409).json({ error: 'This taxi is already in an active queue.' });
       }
       const map = {
@@ -160,8 +158,7 @@ router.post(
 );
 
 /**
- * 2. POST /api/queue/:entryId/dispatch  (Station Worker / Admin)
- * "Tick Departure" — Marks taxi DISPATCHED and notifies the new #1 and #2 drivers.
+ * 2. POST /api/queue/:entryId/dispatch
  */
 router.post(
   '/:entryId/dispatch',
@@ -174,8 +171,8 @@ router.post(
 
       const dispatched = await withTransaction(async (client) => {
         const entryRes = await client.query(
-          `SELECT * FROM queue_entries
-           WHERE id = $1 AND status IN ('WAITING', 'LOADING')
+          `SELECT * FROM teraye_queue_entries
+           WHERE id = ? AND status IN ('WAITING', 'LOADING')
            FOR UPDATE`,
           [entryId]
         );
@@ -191,24 +188,26 @@ router.post(
           throw new Error('WRONG_STATION');
         }
 
-        const updatedRes = await client.query(
-          `UPDATE queue_entries
-           SET status = 'DISPATCHED', dispatched_at = NOW()
-           WHERE id = $1
-           RETURNING *`,
+        await client.query(
+          `UPDATE teraye_queue_entries
+           SET status = 'DISPATCHED', dispatched_at = CURRENT_TIMESTAMP(3)
+           WHERE id = ?`,
           [entryId]
         );
 
         await client.query(
-          `INSERT INTO queue_audit_logs (queue_entry_id, action_by, action_type, notes)
-           VALUES ($1, $2, 'DISPATCH', $3)`,
+          `INSERT INTO teraye_queue_audit_logs (queue_entry_id, action_by, action_type, notes)
+           VALUES (?, ?, 'DISPATCH', ?)`,
           [entryId, req.user.id, req.body.notes || null]
         );
 
+        const updatedRes = await client.query(
+          'SELECT * FROM teraye_queue_entries WHERE id = ? LIMIT 1',
+          [entryId]
+        );
         return updatedRes.rows[0];
       });
 
-      // Asynchronously notify the next two drivers in line (#1 and #2)
       triggerTopTwoNotifications(dispatched.station_id, dispatched.route_id);
 
       return res.json({ entry: dispatched });
@@ -226,8 +225,7 @@ router.post(
 );
 
 /**
- * 3. POST /api/queue/:entryId/exception  (Station Worker / Admin)
- * Handles SKIP, CANCEL, or 5-minute Breakdown REQUEUE back to the front of the line.
+ * 3. POST /api/queue/:entryId/exception
  */
 router.post(
   '/:entryId/exception',
@@ -248,14 +246,13 @@ router.post(
 
       const updated = await withTransaction(async (client) => {
         const entryRes = await client.query(
-          'SELECT * FROM queue_entries WHERE id = $1 FOR UPDATE',
+          'SELECT * FROM teraye_queue_entries WHERE id = ? FOR UPDATE',
           [entryId]
         );
         if (entryRes.rows.length === 0) throw new Error('NOT_FOUND');
         const entry = entryRes.rows[0];
 
         if (action === 'REQUEUE') {
-          // Only allow re-queue if dispatched within BREAKDOWN_GRACE_MINUTES
           if (entry.status !== 'DISPATCHED' || !entry.dispatched_at) {
             throw new Error('CANNOT_REQUEUE');
           }
@@ -265,35 +262,36 @@ router.post(
             throw new Error('GRACE_EXPIRED');
           }
 
-          // Keep original `arrived_at` so the taxi returns cleanly to Position #1
-          const rqRes = await client.query(
-            `UPDATE queue_entries
+          await client.query(
+            `UPDATE teraye_queue_entries
              SET status = 'WAITING', dispatched_at = NULL
-             WHERE id = $1
-             RETURNING *`,
+             WHERE id = ?`,
             [entryId]
           );
           await client.query(
-            `INSERT INTO queue_audit_logs (queue_entry_id, action_by, action_type, notes)
-             VALUES ($1, $2, 'REQUEUE', $3)`,
+            `INSERT INTO teraye_queue_audit_logs (queue_entry_id, action_by, action_type, notes)
+             VALUES (?, ?, 'REQUEUE', ?)`,
             [entryId, req.user.id, notes || 'Mechanical breakdown re-entry']
           );
-          return rqRes.rows[0];
+        } else {
+          if (!['WAITING', 'LOADING'].includes(entry.status)) {
+            throw new Error('ENTRY_NOT_ACTIVE');
+          }
+          const nextStatus = action === 'SKIP' ? 'SKIPPED' : 'CANCELLED';
+          await client.query(
+            'UPDATE teraye_queue_entries SET status = ? WHERE id = ?',
+            [nextStatus, entryId]
+          );
+          await client.query(
+            `INSERT INTO teraye_queue_audit_logs (queue_entry_id, action_by, action_type, notes)
+             VALUES (?, ?, ?, ?)`,
+            [entryId, req.user.id, action, notes]
+          );
         }
 
-        // SKIP or CANCEL an active entry
-        if (!['WAITING', 'LOADING'].includes(entry.status)) {
-          throw new Error('ENTRY_NOT_ACTIVE');
-        }
-        const nextStatus = action === 'SKIP' ? 'SKIPPED' : 'CANCELLED';
         const upRes = await client.query(
-          `UPDATE queue_entries SET status = $1 WHERE id = $2 RETURNING *`,
-          [nextStatus, entryId]
-        );
-        await client.query(
-          `INSERT INTO queue_audit_logs (queue_entry_id, action_by, action_type, notes)
-           VALUES ($1, $2, $3, $4)`,
-          [entryId, req.user.id, action, notes]
+          'SELECT * FROM teraye_queue_entries WHERE id = ? LIMIT 1',
+          [entryId]
         );
         return upRes.rows[0];
       });
@@ -315,9 +313,9 @@ router.post(
     }
   }
 );
+
 /**
- * 4. GET /api/queue/station/:stationId?routeId=12  (Station Worker / Admin)
- * Live Terminal Queue Board — Returns ordered FIFO entries + recent dispatches.
+ * 4. GET /api/queue/station/:stationId?routeId=12
  */
 router.get(
   '/station/:stationId',
@@ -333,12 +331,11 @@ router.get(
         return res.status(400).json({ error: 'Valid stationId is required.' });
       }
 
-      // Active queue ordered strictly by FIFO per route
       const params = [stationId];
       let routeFilterSql = '';
       if (routeId) {
         params.push(routeId);
-        routeFilterSql = 'AND qe.route_id = $2';
+        routeFilterSql = 'AND qe.route_id = ?';
       }
 
       const activeRes = await query(
@@ -348,26 +345,36 @@ router.get(
            qe.route_id,
            qe.arrived_at,
            qe.status,
-           ROW_NUMBER() OVER (PARTITION BY qe.route_id ORDER BY qe.arrived_at ASC)::int AS position,
-           EXTRACT(EPOCH FROM (NOW() - qe.arrived_at))::int / 60 AS wait_minutes,
+           TIMESTAMPDIFF(MINUTE, qe.arrived_at, UTC_TIMESTAMP()) AS wait_minutes,
            t.plate_number,
            u.full_name AS driver_name,
            u.phone_number AS driver_phone,
            r.destination_am,
            r.destination_en,
            r.route_code
-         FROM queue_entries qe
-         JOIN taxis t ON t.id = qe.taxi_id
-         LEFT JOIN users u ON u.id = t.driver_user_id
-         JOIN routes r ON r.id = qe.route_id
-         WHERE qe.station_id = $1
+         FROM teraye_queue_entries qe
+         JOIN teraye_taxis t ON t.id = qe.taxi_id
+         LEFT JOIN teraye_users u ON u.id = t.driver_user_id
+         JOIN teraye_routes r ON r.id = qe.route_id
+         WHERE qe.station_id = ?
            AND qe.status IN ('WAITING', 'LOADING')
            ${routeFilterSql}
          ORDER BY qe.route_id ASC, qe.arrived_at ASC`,
         params
       );
 
-      // Recently dispatched taxis (last 15 mins) — allows 1-tap Breakdown Re-Queue
+      // Compute 1-based FIFO position per route in JS (works on both MySQL 5.7 and 8.0+)
+      const routeCounters = new Map();
+      const numberedQueue = activeRes.rows.map((row) => {
+        const nextPos = (routeCounters.get(row.route_id) || 0) + 1;
+        routeCounters.set(row.route_id, nextPos);
+        return {
+          ...row,
+          position: nextPos,
+          wait_minutes: Math.max(0, Number(row.wait_minutes || 0)),
+        };
+      });
+
       const recentRes = await query(
         `SELECT
            qe.id,
@@ -376,12 +383,12 @@ router.get(
            t.plate_number,
            r.destination_en,
            r.route_code
-         FROM queue_entries qe
-         JOIN taxis t ON t.id = qe.taxi_id
-         JOIN routes r ON r.id = qe.route_id
-         WHERE qe.station_id = $1
+         FROM teraye_queue_entries qe
+         JOIN teraye_taxis t ON t.id = qe.taxi_id
+         JOIN teraye_routes r ON r.id = qe.route_id
+         WHERE qe.station_id = ?
            AND qe.status = 'DISPATCHED'
-           AND qe.dispatched_at >= NOW() - INTERVAL '15 minutes'
+           AND qe.dispatched_at >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 15 MINUTE)
            ${routeFilterSql}
          ORDER BY qe.dispatched_at DESC
          LIMIT 10`,
@@ -390,7 +397,7 @@ router.get(
 
       return res.json({
         stationId,
-        queue: activeRes.rows,
+        queue: numberedQueue,
         recentDispatches: recentRes.rows,
       });
     } catch (err) {
@@ -401,8 +408,7 @@ router.get(
 );
 
 /**
- * 5. GET /api/queue/my-turn  (Driver)
- * Live Driver View — Exact rank, plates ahead, wait estimate, and recent trip history.
+ * 5. GET /api/queue/my-turn
  */
 router.get(
   '/my-turn',
@@ -410,13 +416,12 @@ router.get(
   requireRegisteredUser,
   async (req, res) => {
     try {
-      // Find driver's linked taxi
       const taxiRes = await query(
         `SELECT t.id, t.plate_number, t.qr_token, t.default_route_id,
                 r.destination_am AS default_dest_am, r.destination_en AS default_dest_en
-         FROM taxis t
-         LEFT JOIN routes r ON r.id = t.default_route_id
-         WHERE t.driver_user_id = $1
+         FROM teraye_taxis t
+         LEFT JOIN teraye_routes r ON r.id = t.default_route_id
+         WHERE t.driver_user_id = ?
          LIMIT 1`,
         [req.user.id]
       );
@@ -426,15 +431,14 @@ router.get(
       }
       const taxi = taxiRes.rows[0];
 
-      // Check if currently in an active queue
       const activeRes = await query(
         `SELECT qe.id, qe.station_id, qe.route_id, qe.arrived_at, qe.status,
                 s.name_am AS station_am, s.name_en AS station_en,
                 r.destination_am, r.destination_en, r.route_code
-         FROM queue_entries qe
-         JOIN stations s ON s.id = qe.station_id
-         JOIN routes r ON r.id = qe.route_id
-         WHERE qe.taxi_id = $1 AND qe.status IN ('WAITING', 'LOADING')
+         FROM teraye_queue_entries qe
+         JOIN teraye_stations s ON s.id = qe.station_id
+         JOIN teraye_routes r ON r.id = qe.route_id
+         WHERE qe.taxi_id = ? AND qe.status IN ('WAITING', 'LOADING')
          LIMIT 1`,
         [taxi.id]
       );
@@ -443,13 +447,12 @@ router.get(
       if (activeRes.rows.length > 0) {
         const entry = activeRes.rows[0];
 
-        // Fetch all active vehicles on this same station + route to compute rank & plates ahead
         const lineRes = await query(
           `SELECT qe.id, t.plate_number, qe.arrived_at
-           FROM queue_entries qe
-           JOIN taxis t ON t.id = qe.taxi_id
-           WHERE qe.station_id = $1
-             AND qe.route_id = $2
+           FROM teraye_queue_entries qe
+           JOIN teraye_taxis t ON t.id = qe.taxi_id
+           WHERE qe.station_id = ?
+             AND qe.route_id = ?
              AND qe.status IN ('WAITING', 'LOADING')
            ORDER BY qe.arrived_at ASC`,
           [entry.station_id, entry.route_id]
@@ -466,19 +469,17 @@ router.get(
           position,
           totalInLine: lineRes.rows.length,
           platesAhead,
-          // Rough estimate: ~4 mins per minibus ahead (refineable later from real dispatch velocity)
           estimatedWaitMinutes: Math.max(0, (position - 1) * 4),
         };
       }
 
-      // Fetch driver's last 10 completed dispatches
       const historyRes = await query(
         `SELECT qe.id, qe.arrived_at, qe.dispatched_at,
                 s.name_en AS station_en, r.destination_en, r.route_code
-         FROM queue_entries qe
-         JOIN stations s ON s.id = qe.station_id
-         JOIN routes r ON r.id = qe.route_id
-         WHERE qe.taxi_id = $1 AND qe.status = 'DISPATCHED'
+         FROM teraye_queue_entries qe
+         JOIN teraye_stations s ON s.id = qe.station_id
+         JOIN teraye_routes r ON r.id = qe.route_id
+         WHERE qe.taxi_id = ? AND qe.status = 'DISPATCHED'
          ORDER BY qe.dispatched_at DESC
          LIMIT 10`,
         [taxi.id]

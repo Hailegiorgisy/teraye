@@ -2,7 +2,7 @@ import { Telegraf, Markup } from 'telegraf';
 import { query } from '../config/db.js';
 
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
-const miniAppUrl = process.env.MINI_APP_URL || 'https://korcha.com.et';
+const miniAppUrl = process.env.MINI_APP_URL || 'https://teraye.korcha.com.et';
 
 export const bot = botToken ? new Telegraf(botToken) : null;
 
@@ -36,9 +36,9 @@ if (bot) {
       // Find user and their linked taxi
       const userRes = await query(
         `SELECT u.id, u.full_name, u.role, t.id AS taxi_id, t.plate_number
-         FROM users u
-         LEFT JOIN taxis t ON t.driver_user_id = u.id
-         WHERE u.telegram_id = $1
+         FROM teraye_users u
+         LEFT JOIN teraye_taxis t ON t.driver_user_id = u.id
+         WHERE u.telegram_id = ?
          LIMIT 1`,
         [telegramId]
       );
@@ -67,10 +67,10 @@ if (bot) {
         `SELECT qe.id, qe.station_id, qe.route_id, qe.arrived_at, qe.status,
                 s.name_am AS station_am, s.name_en AS station_en,
                 r.destination_am, r.destination_en
-         FROM queue_entries qe
-         JOIN stations s ON s.id = qe.station_id
-         JOIN routes r ON r.id = qe.route_id
-         WHERE qe.taxi_id = $1 AND qe.status IN ('WAITING', 'LOADING')
+         FROM teraye_queue_entries qe
+         JOIN teraye_stations s ON s.id = qe.station_id
+         JOIN teraye_routes r ON r.id = qe.route_id
+         WHERE qe.taxi_id = ? AND qe.status IN ('WAITING', 'LOADING')
          LIMIT 1`,
         [record.taxi_id]
       );
@@ -86,16 +86,16 @@ if (bot) {
 
       // Calculate exact FIFO rank (1-based) on that station + route
       const rankRes = await query(
-        `SELECT COUNT(*)::int AS ahead
-         FROM queue_entries
-         WHERE station_id = $1
-           AND route_id = $2
+        `SELECT COUNT(*) AS ahead
+         FROM teraye_queue_entries
+         WHERE station_id = ?
+           AND route_id = ?
            AND status IN ('WAITING', 'LOADING')
-           AND arrived_at <= $3`,
+           AND arrived_at <= ?`,
         [active.station_id, active.route_id, active.arrived_at]
       );
 
-      const position = rankRes.rows[0].ahead;
+      const position = Number(rankRes.rows[0].ahead);
       const statusBadge =
         position === 1
           ? '🟢 *YOUR TURN (#1) — Proceed to loading bay!*'
