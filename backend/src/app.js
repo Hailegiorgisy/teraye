@@ -1,20 +1,22 @@
-import 'dotenv/config';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Load backend/.env explicitly so Phusion Passenger resolves env vars regardless of cwd
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
+
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import dotenv from 'dotenv';
-import { pool } from './config/db.js';
-import authRoutes from './routes/auth.js';
+import { pool, query } from './config/db.js';
 import authRoutes from './routes/auth.routes.js';
 import stationRoutes from './routes/stations.routes.js';
 import queueRoutes from './routes/queue.routes.js';
 import { bot } from './bot/bot.js';
 
-dotenv.config();
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const frontendDist = path.resolve(__dirname, '../public');
 
 const app = express();
@@ -43,10 +45,10 @@ app.use(
 
 app.use(express.json({ limit: '256kb' }));
 
-// 2. Health Check Endpoint (Verify Plesk + PostgreSQL connectivity)
+// 2. Health Check Endpoint (Verify Plesk + MySQL connectivity)
 app.get('/api/health', async (req, res) => {
   try {
-    const dbCheck = await pool.query('SELECT NOW() AS server_time');
+    const dbCheck = await query('SELECT NOW() AS server_time');
     return res.json({
       status: 'ok',
       app: process.env.APP_NAME || 'Teraye',
@@ -93,7 +95,7 @@ const server = app.listen(PORT, async () => {
   if (bot) {
     try {
       if (isProd && process.env.PUBLIC_API_URL) {
-        const fullWebhookUrl = `${process.env.PUBLIC_API_URL.replace(/\/$/, '')}${webhookPath}`;
+        const fullWebhookUrl = `${process.env.PUBLIC_API_URL.replace(/\\/$/, '')}${webhookPath}`;
         await bot.telegram.setWebhook(fullWebhookUrl);
         console.log(`🤖 Telegram Bot webhook registered: ${fullWebhookUrl}`);
       } else {
@@ -114,7 +116,7 @@ async function shutdown(signal) {
   }
   server.close(async () => {
     await pool.end();
-    console.log('✅ HTTP server and PostgreSQL pool closed.');
+    console.log('✅ HTTP server and MySQL pool closed.');
     process.exit(0);
   });
 }
