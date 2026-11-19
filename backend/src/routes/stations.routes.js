@@ -34,14 +34,14 @@ router.get('/', async (req, res) => {
       `SELECT id, name_am, name_en, sub_city
        FROM teraye_stations
        WHERE is_active = TRUE
-       ORDER BY name_en ASC`
+       ORDER BY id ASC`
     );
 
     const routesRes = await query(
       `SELECT id, origin_station_id, destination_am, destination_en, route_code
        FROM teraye_routes
        WHERE is_active = TRUE
-       ORDER BY destination_en ASC`
+       ORDER BY id ASC`
     );
 
     const routesByStation = new Map();
@@ -60,28 +60,28 @@ router.get('/', async (req, res) => {
     return res.json({ stations });
   } catch (err) {
     console.error('[GET /api/stations Error]:', err);
-    return res.status(500).json({ error: 'Failed to load stations and routes.' });
+    return res.status(500).json({ error: 'መናኸሪያዎችን መጫን አልተቻለም።' });
   }
 });
 
 /**
- * 2. POST /api/stations
+ * 2. POST /api/stations (ADMIN & WORKER/Marshal can add hubs)
  */
 router.post(
   '/',
   requireAuth,
   requireRegisteredUser,
-  requireRole('ADMIN'),
+  requireRole('ADMIN', 'WORKER'),
   async (req, res) => {
     try {
       const nameAm = String(req.body.nameAm || '').trim();
-      const nameEn = String(req.body.nameEn || '').trim();
+      const nameEn = String(req.body.nameEn || '').trim() || nameAm;
       const subCity = String(req.body.subCity || '').trim() || null;
 
-      if (!nameAm || !nameEn) {
+      if (!nameAm) {
         return res
           .status(400)
-          .json({ error: 'Both Amharic (nameAm) and English (nameEn) station names are required.' });
+          .json({ error: 'የመናኸሪያው ስም በአማርኛ ያስፈልጋል።' });
       }
 
       const { rows: insertInfo } = await query(
@@ -98,29 +98,30 @@ router.post(
       return res.status(201).json({ station: stationRes.rows[0] });
     } catch (err) {
       console.error('[POST /api/stations Error]:', err);
-      return res.status(500).json({ error: 'Failed to create station.' });
+      return res.status(500).json({ error: 'መናኸሪያ መጨመር አልተቻለም።' });
     }
   }
 );
 
 /**
- * 3. POST /api/stations/:stationId/routes
+ * 3. POST /api/stations/:stationId/routes (ADMIN & WORKER/Marshal can add routes)
  */
 router.post(
   '/:stationId/routes',
   requireAuth,
   requireRegisteredUser,
-  requireRole('ADMIN'),
+  requireRole('ADMIN', 'WORKER'),
   async (req, res) => {
     try {
       const stationId = Number(req.params.stationId);
       const destinationAm = String(req.body.destinationAm || '').trim();
-      const destinationEn = String(req.body.destinationEn || '').trim();
-      const routeCode = String(req.body.routeCode || '').trim().toUpperCase();
+      const destinationEn = String(req.body.destinationEn || '').trim() || destinationAm;
+      const rawCode = String(req.body.routeCode || '').trim().toUpperCase();
+      const routeCode = rawCode || `ST${stationId}-${Date.now().toString(36).toUpperCase()}`;
 
-      if (!stationId || !destinationAm || !destinationEn || !routeCode) {
+      if (!stationId || !destinationAm) {
         return res.status(400).json({
-          error: 'stationId, destinationAm, destinationEn, and routeCode are required.',
+          error: 'መናኸሪያ እና የመድረሻ መስመር ስም በአማርኛ ያስፈልጋሉ።',
         });
       }
 
@@ -138,10 +139,10 @@ router.post(
       return res.status(201).json({ route: routeRes.rows[0] });
     } catch (err) {
       if (err.code === 'ER_DUP_ENTRY') {
-        return res.status(409).json({ error: 'Route code already exists.' });
+        return res.status(409).json({ error: 'ይህ የመስመር ኮድ ቀድሞ ተመዝግቧል።' });
       }
       console.error('[POST /api/stations/:stationId/routes Error]:', err);
-      return res.status(500).json({ error: 'Failed to create route.' });
+      return res.status(500).json({ error: 'መስመር መጨመር አልተቻለም።' });
     }
   }
 );
@@ -175,7 +176,7 @@ router.get(
       }
 
       if (q.length < 2) {
-        return res.status(400).json({ error: 'Enter at least 2 characters to search plates.' });
+        return res.status(400).json({ error: 'ቢያንስ 2 የታርጋ ፊደላት/ቁጥሮች ያስገቡ።' });
       }
 
       const searchRes = await query(
@@ -194,7 +195,7 @@ router.get(
       return res.json({ taxis: searchRes.rows });
     } catch (err) {
       console.error('[GET /api/stations/taxis/search Error]:', err);
-      return res.status(500).json({ error: 'Failed to search taxis.' });
+      return res.status(500).json({ error: 'ታክሲ መፈለግ አልተቻለም።' });
     }
   }
 );
@@ -215,11 +216,11 @@ router.post(
       const defaultRouteId = req.body.defaultRouteId ? Number(req.body.defaultRouteId) : null;
 
       if (!plate) {
-        return res.status(400).json({ error: 'Valid plate number is required (e.g., AA-3-A45219).' });
+        return res.status(400).json({ error: 'ትክክለኛ የታርጋ ቁጥር ያስገቡ (ለምሳሌ AA-3-A45219)።' });
       }
       if (!driverPhone || driverName.length < 2) {
         return res.status(400).json({
-          error: 'Driver full name and valid Ethiopian phone number (+251...) are required.',
+          error: 'የሹፌሩ ሙሉ ስም እና የኢትዮጵያ ስልክ ቁጥር (+251...) ያስፈልጋል።',
         });
       }
 
@@ -264,10 +265,10 @@ router.post(
       return res.status(201).json(created);
     } catch (err) {
       if (err.code === 'ER_DUP_ENTRY') {
-        return res.status(409).json({ error: 'A taxi with this plate number is already registered.' });
+        return res.status(409).json({ error: 'ይህ የታርጋ ቁጥር ቀድሞ ተመዝግቧል።' });
       }
       console.error('[POST /api/stations/taxis Error]:', err);
-      return res.status(500).json({ error: 'Failed to register taxi.' });
+      return res.status(500).json({ error: 'ታክሲ መመዝገብ አልተቻለም።' });
     }
   }
 );
