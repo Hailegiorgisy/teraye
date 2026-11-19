@@ -1,153 +1,37 @@
-import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
-import { query } from '../config/db.js';
+import pool from '../db.js'; // adjust path to your MySQL pool
 
-/**
- * Cryptographically verifies Telegram WebApp initData using HMAC-SHA256
- * per official Telegram Mini App security specifications.
- */
-function verifyTelegramInitData(initDataRaw, botToken) {
-  if (!initDataRaw || !botToken) return null;
-
-  const params = new URLSearchParams(initDataRaw);
-  const hash = params.get('hash');
-  if (!hash) return null;
-
-  // Reject stale payloads older than 24 hours (86400 seconds)
-  const authDate = Number(params.get('auth_date'));
-  const nowSeconds = Math.floor(Date.now() / 1000);
-  if (!authDate || nowSeconds - authDate > 86400) {
-    return null;
-  }
-
-  params.delete('hash');
-
-  // Sort keys alphabetically and join with newline
-  const dataCheckString = Array.from(params.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, val]) => `${key}=${val}`)
-    .join('\n');
-
-  // Step 1: secret_key = HMAC_SHA256("WebAppData", bot_token)
-  const secretKey = crypto
-    .createHmac('sha256', 'WebAppData')
-    .update(botToken)
-    .digest();
-
-  // Step 2: calculated_hash = HMAC_SHA256(secret_key, data_check_string)
-  const calculatedHash = crypto
-    .createHmac('sha256', secretKey)
-    .update(dataCheckString)
-    .digest('hex');
-
-  // Constant-time comparison to prevent timing attacks
-  const isValid =
-    calculatedHash.length === hash.length &&
-    crypto.timingSafeEqual(Buffer.from(calculatedHash), Buffer.from(hash));
-
-  if (!isValid) return null;
-
-  try {
-    return JSON.parse(params.get('user'));
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Unified Auth Middleware:
- * Supports both:
- *   1. Header `x-telegram-init-data: <raw_init_data>` (Telegram Mini App)
- *   2. Header `Authorization: Bearer <jwt_token>`    (Standalone Mobile App / Web)
- */
 export async function requireAuth(req, res, next) {
+  // Temporary development bypass (controlled via .env)
+  if (process.env.DEV_BYPASS_AUTH === 'true') {
+    try {
+      const [rows] = await pool.query(
+        "SELECT id, full_name, phone, role, station_id, telegram_id FROM teraye_users WHERE role = 'ADMIN' AND is_active = 1 LIMIT 1"
+      );
+      req.user = rows[0] || {
+        id: 1,
+        full_name: 'Dev Admin',
+        phone: '+251921319216',
+        role: 'ADMIN',
+        station_id: 1,
+      };
+      return next();
+    } catch (err) {
+      return next(err);
+    }
+  }
+
+  // Normal production JWT verification
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  if (!token) {
+    return res.status(401).json({ error: 'Authentication required.' });
+  }
+
   try {
-    const tgInitData = req.headers['x-telegram-init-data'];
-    const authHeader = req.headers['authorization'];
-
-    // --- Path A: Telegram Mini App Authentication ---
-    if (tgInitData) {
-      const tgUser = verifyTelegramInitData(
-        tgInitData,
-        process.env.TELEGRAM_BOT_TOKEN
-      );
-
-      if (!tgUser?.id) {
-        return res.status(401).json({ error: 'Invalid or expired Telegram session.' });
-      }
-
-      const dbRes = await query(
-        'SELECT id, telegram_id, phone_number, full_name, role, assigned_station_id, is_active FROM teraye_users WHERE telegram_id = ? LIMIT 1',
-        [tgUser.id]
-      );
-
-      if (dbRes.rows.length === 0) {
-        // User has valid Telegram signature, but hasn't completed phone registration yet
-        req.telegramUser = tgUser;
-        req.user = null;
-        return next();
-      }
-
-      const user = dbRes.rows[0];
-      if (!user.is_active) {
-        return res.status(403).json({ error: 'Account is suspended. Contact station administrator.' });
-      }
-
-      req.user = user;
-      return next();
-    }
-
-    // --- Path B: Mobile App / Web JWT Authentication ---
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.slice(7);
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-      const dbRes = await query(
-        'SELECT id, telegram_id, phone_number, full_name, role, assigned_station_id, is_active FROM teraye_users WHERE id = ? LIMIT 1',
-        [decoded.userId]
-      );
-
-      if (dbRes.rows.length === 0 || !dbRes.rows[0].is_active) {
-        return res.status(401).json({ error: 'Invalid or inactive user token.' });
-      }
-
-      req.user = dbRes.rows[0];
-      return next();
-    }
-
-    return res.status(401).json({ error: 'Authentication credentials required.' });
-  } catch (err) {
-    console.error('[Auth Middleware Error]:', err.message);
-    return res.status(401).json({ error: 'Unauthorized request.' });
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    return next();
+  } catch {
+    return res.status(401).json({ error: 'Invalid or expired token.' });
   }
-}
-
-/**
- * Ensures the authenticated user has completed registration in `teraye_users` table
- */
-export function requireRegisteredUser(req, res, next) {
-  if (!req.user) {
-    return res.status(403).json({
-      error: 'Registration incomplete. Please link your +251 phone number first.',
-      code: 'ONBOARDING_REQUIRED',
-    });
-  }
-  next();
-}
-
-/**
- * Role-Based Access Guard: e.g., requireRole('WORKER', 'ADMIN')
- */
-export function requireRole(...allowedRoles) {
-  return (req, res, next) => {
-    if (!req.user) {
-      return res.status(401).json({ error: 'Authentication required.' });
-    }
-    if (!allowedRoles.includes(req.user.role)) {
-      return res.status(403).json({
-        error: `Access denied. Required role: ${allowedRoles.join(' or ')}.`,
-      });
-    }
-    next();
-  };
 }

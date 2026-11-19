@@ -4,6 +4,7 @@ import { apiFetch, isTelegramMiniApp, getMobileToken } from './lib/api';
 import { AuthScreen } from './components/AuthScreen';
 import { DriverDashboard } from './components/DriverDashboard';
 import { MarshalDashboard } from './components/MarshalDashboard';
+import terayeLogo from './assets/teraye-logo-transparent.png';
 
 export function App() {
   const [status, setStatus] = useState<'loading' | 'unauthenticated' | 'onboarding' | 'ready'>('loading');
@@ -17,6 +18,24 @@ export function App() {
         WebApp.ready();
         WebApp.expand();
       } else if (!getMobileToken()) {
+        // Check if backend DEV_BYPASS_AUTH=true is active during development
+        try {
+          const devRes = await fetch('/api/auth/dev-session');
+          if (devRes.ok) {
+            const devData = await devRes.json();
+            if (devData?.token && devData?.user) {
+              // Store token under common keys used by getMobileToken()
+              localStorage.setItem('teraye_token', devData.token);
+              localStorage.setItem('token', devData.token);
+              setUser(devData.user);
+              setStatus('ready');
+              return;
+            }
+          }
+        } catch {
+          // Ignore when dev bypass is disabled or unreachable
+        }
+
         setStatus('unauthenticated');
         return;
       }
@@ -40,9 +59,13 @@ export function App() {
 
   if (status === 'loading') {
     return (
-      <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center">
-        <div className="text-2xl font-black tracking-wide text-teal-400">ተራየ</div>
-        <p className="text-xs text-slate-400 mt-1">Loading Teraye...</p>
+      <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col items-center justify-center p-4">
+        <img
+          src={terayeLogo}
+          alt="ተራየ (Teraye)"
+          className="h-24 w-auto object-contain mb-3 animate-pulse"
+        />
+        <p className="text-xs font-medium text-slate-500">Loading Teraye...</p>
       </div>
     );
   }

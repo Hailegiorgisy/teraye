@@ -106,3 +106,28 @@ router.post('/reset-pin', async (req, res) => {
     return res.status(500).json({ error: 'Failed to reset PIN.' });
   }
 });
+router.get('/dev-session', async (req, res) => {
+  if (process.env.DEV_BYPASS_AUTH !== 'true') {
+    return res.status(403).json({ error: 'Dev bypass is disabled.' });
+  }
+
+  const [rows] = await pool.query(
+    "SELECT id, full_name, phone, role, station_id, telegram_id FROM teraye_users WHERE role = 'ADMIN' AND is_active = 1 LIMIT 1"
+  );
+
+  const user = rows[0] || {
+    id: 1,
+    full_name: 'Dev Admin',
+    phone: '+251921319216',
+    role: 'ADMIN',
+    station_id: 1,
+  };
+
+  const token = jwt.sign(
+    { id: user.id, role: user.role, station_id: user.station_id },
+    process.env.JWT_SECRET,
+    { expiresIn: '30d' }
+  );
+
+  return res.json({ token, user });
+});
