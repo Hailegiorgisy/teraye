@@ -48,19 +48,26 @@ app.use(express.json({ limit: '256kb' }));
 // 2. Health Check Endpoint (Verify Plesk + MySQL connectivity)
 app.get('/api/health', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT NOW() AS server_time');
+    const dbCheck = await query('SELECT NOW() AS server_time');
     return res.json({
       status: 'ok',
       app: process.env.APP_NAME || 'Teraye',
-      time: rows[0].server_time,
+      time: dbCheck.rows[0].server_time,
     });
   } catch (err) {
-    console.error('[Health Check Failed]:', err);
+    console.error('[Health Check Failed]:', err.message);
     return res.status(503).json({
       status: 'error',
       database: 'unreachable',
       detail: err.message,
       code: err.code,
+      debug: {
+        host: process.env.DB_HOST,
+        port: process.env.DB_PORT,
+        db: process.env.DB_NAME,
+        user: process.env.DB_USER,
+        pwLen: process.env.DB_PASSWORD ? process.env.DB_PASSWORD.length : 0,
+      },
     });
   }
 });
@@ -125,18 +132,6 @@ async function shutdown(signal) {
     process.exit(0);
   });
 }
-return res.status(503).json({
-  status: 'error',
-  database: 'unreachable',
-  detail: err.message,
-  code: err.code,
-  debug: {
-    host: process.env.DB_HOST,
-    port: process.env.DB_PORT,
-    db: process.env.DB_NAME,
-    user: process.env.DB_USER,
-    pwLen: process.env.DB_PASSWORD ? process.env.DB_PASSWORD.length : 0,
-  },
-});
+
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
