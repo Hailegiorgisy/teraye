@@ -48,15 +48,20 @@ app.use(express.json({ limit: '256kb' }));
 // 2. Health Check Endpoint (Verify Plesk + MySQL connectivity)
 app.get('/api/health', async (req, res) => {
   try {
-    const dbCheck = await query('SELECT NOW() AS server_time');
+    const [rows] = await pool.query('SELECT NOW() AS server_time');
     return res.json({
       status: 'ok',
       app: process.env.APP_NAME || 'Teraye',
-      time: dbCheck.rows[0].server_time,
+      time: rows[0].server_time,
     });
   } catch (err) {
-    console.error('[Health Check Failed]:', err.message);
-    return res.status(503).json({ status: 'error', database: 'unreachable' });
+    console.error('[Health Check Failed]:', err);
+    return res.status(503).json({
+      status: 'error',
+      database: 'unreachable',
+      detail: err.message,
+      code: err.code,
+    });
   }
 });
 
